@@ -1,4 +1,4 @@
-Design project exploring the furture of public transit
+Design project exploring the furture of public transit in Philadelphia. Process included interviews, observations, journey mapping, and prototyping.
 
 University of Pennsylvania IPD 572- Design Thinking Fall 2021
 
