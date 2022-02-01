@@ -1,0 +1,333 @@
+---
+title: "501 Final Analysis"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(infer)
+library(readr)
+library(tidyr)
+library(lme4)
+library(readxl)
+
+library(BayesFactor)
+library(dplyr)
+library(ggplot2)
+library(cowplot)
+library(grid)
+library(gridExtra)
+library(plotrix)
+library(ggridges)
+library(ggpubr)
+library(stargazer)
+```
+```{r}
+#Load data
+data <- read_excel("Group8_Data_NumericValues_clean.xls", col_names = FALSE, skip = 3)
+varnames <- read_excel("Group8_Data_NumericValues_clean.xls", n_max = 1)
+colnames(data) <- colnames(varnames)
+```
+#### Importing and cleaning dataset
+
+```{r}
+#"Group8_Data_NumericValues_clean.xls" contains only responses which have passed the qualitative exclusion criteria for T1 and T2
+
+#Identify columns of interest 
+clean <- data %>% select(6, 24:27, 32, 37, 43:52, 58:67,72:75, 91, 92, 96) %>% rename(duration = `Duration (in seconds)`)
+```
+```{r}
+#Primary and secondary outcome variable are calculated here
+#Time based exclusion criteria are filtered here. Speeders are removed
+clean1 <- clean %>% filter(duration >= 129) %>%  mutate(conditionLabel= case_when(
+                                     Condition == 1 ~ "Past- No Control",
+                                     Condition == 2 ~ "Past- In Control",
+                                     Condition == 3 ~ "Present- No Control (Ultimatum Game)",
+                                     Condition == 4 ~ "Present- In Control (Dictator Game)")) %>% 
+                                       rowwise() %>% 
+                                                mutate( meanPreDV =  mean(preDV1, preDV2),
+                                                      meanDV = mean(DV1, DV2),
+                                                      meanPreC = mean(preC1, preC2),
+                                                      meanC = mean(C1, C2),
+                                                      deltaC = meanPreC-meanC
+                                                      ) 
+```
+
+```{r}
+# Function for Bayes factor
+BFplus0 <- function(BFmodel,BFeffect, test.rule){
+  BFmodel      <- BFmodel
+  BFeffect     <- BFeffect 
+  consistent   <- test.rule
+  N_consistent <- sum(consistent)
+  bf_re        <- (N_consistent / 10000) / (1 / 2)
+  bf_e0        <- as.vector(BFeffect)
+  ## Use transitivity to compute desired Bayes factor
+  bf_r0        <- bf_re * bf_e0
+  bf_plus_0    <- bf_r0
+  return(bf_plus_0)} 
+
+```
+
+#### Distribution of OV Scores
+```{r}
+#Plotting the distribution of Belief in God Scores
+plot_labels <- c("1" = "T1", "2" = "T2", "3" = "T3", "4" = "T4")
+ggplot(clean1, aes(x = meanDV)) + facet_wrap(Condition ~ ., labeller = labeller(Condition = plot_labels)) + geom_histogram()  + labs(x= "Belief in God Score", y= "Number of Respondents") + scale_x_continuous(breaks = seq(1, 7, 1), lim = c(1, 7)) +theme_bw() 
+
+```
+
+#### Hypothesis 1 Analysis
+H1: Perceptions about lack of control in the present will lead to an increased belief in the existence of a controlling God
+```{r}
+# Recoding conditions for hypothesis testing T3 vs Others
+H1recode            <- clean1 %>% mutate(h1comp = case_when(
+                                     Condition == 1~"null" ,
+                                     Condition == 2~"null" ,
+                                     Condition == 3~"alt" ,
+                                     Condition == 4~"null" ))
+H1null              <- lmBF(meanDV ~ Reli, data = H1recode)
+H1alt               <- lmBF(meanDV ~ h1comp + Reli, data = H1recode)
+BFH1                <- H1alt/H1null
+samples             <- posterior(H1alt, iterations = 10000)
+
+mean.dif.condition  <- samples[,"h1comp-alt"] - samples[,"h1comp-null"]
+med.mean.dif.con    <- median(mean.dif.condition)
+grant.slope.rel     <- samples[,"Reli-Reli"]
+med.grant.slope.rel <- median(grant.slope.rel)
+test.rule           <- (samples[,"h1comp-alt"] < samples[,"h1comp-null"])
+BF_rest_exp         <- BFplus0(H1alt, BFH1, test.rule)
+
+#Interaction effect model exploration
+Mfull               <- lmBF(meanDV ~ Reli + h1comp + Reli:h1comp, data = H1recode)
+Mint                <- Mfull/H1alt
+
+# Calculate prior and posterior model probabilities 
+BFs            <- c(H1null, H1alt, Mfull)           #get relevant models to compare 
+prior.odds     <- newPriorOdds(BFs, type = "equal") #set all prior odds to 1
+post.odds      <- prior.odds * BFs                  #calculate posterior odds based on Bayes' rule
+post.prob      <- as.BFprobability(post.odds)       #Normalize to add up to 1 (probabilities)
+posterior.prob <- post.prob
+posterior.prob                                      # analyzed output
+```
+```{r}
+#Calculate Wilcoxon Rank Sum median differences.
+H1test <- compare_means(meanDV ~ h1comp, data= H1recode, method = "wilcox.test", adjustment = "holmes")
+H1test
+```
+```{r}
+# Create boxplot visualization with Wilcoxon p-value
+comparisons <- list( c("null", "alt") )
+H1recode %>%      ggplot(aes(x= h1comp, y= meanDV)) + 
+                  geom_boxplot() + 
+                  stat_compare_means(comparisons= comparisons) + 
+                  labs(x= "Condition", y= "Belief in God") + 
+                  geom_jitter(width = 0.2, height = 0.2) + 
+                  scale_y_continuous(breaks = seq(0, 8, 1), lim = c(0, 8)) + 
+                  theme_classic() + 
+                  scale_x_discrete(labels= c( "Present- No Control", "Null")) 
+```
+#### Hypothesis 2 Analysis
+H2: Situations in which one had no personal control will result in a more fervent belief in the existence of a controlling God, compared to situations in which one does have personal control.
+```{r}
+# Recoding conditions for hypothesis testing no-control(T1 and T3) vs in-control (T2 and T4)
+H2recode            <- clean1 %>% mutate(h2var = case_when(
+                                     Condition == 1~"no" ,
+                                     Condition == 2~"in" ,
+                                     Condition == 3~"no" ,
+                                     Condition == 4~"in" ))
+H2null              <- lmBF(meanDV ~ Reli, data = H2recode)
+H2alt               <- lmBF(meanDV ~ h2var + Reli, data = H2recode)
+BFH2                <- H2alt/H2null
+samples2            <- posterior(H2alt, iterations = 10000)
+
+mean.dif.condition2  <- samples2[,"h2var-no"] - samples2[,"h2var-in"]
+med.mean.dif.con2    <- median(mean.dif.condition2)
+grant.slope.rel2     <- samples2[,"Reli-Reli"]
+med.grant.slope.rel2 <- median(grant.slope.rel2)
+test.rule2           <- (samples2[,"h2var-no"] < samples2[,"h2var-in"])
+BF_rest_exp2         <- BFplus0(H2alt, BFH2, test.rule2)
+
+#Interaction effect model exploration
+M2full              <- lmBF(meanDV ~ Reli + h2var + Reli:h2var, data = H2recode)
+M2int               <- M2full/H2alt
+
+# Calculate prior and posterior model probabilities
+BFs2            <- c(H2null, H2alt, M2full)           #get relevant models to compare 
+prior.odds2     <- newPriorOdds(BFs2, type = "equal") #set all prior odds to 1
+post.odds2      <- prior.odds2 * BFs2                 #calculate posterior odds based on Bayes' rule
+post.prob2      <- as.BFprobability(post.odds2)       #Normalize to add up to 1 (probabilities)
+posterior.prob2 <- post.prob2
+posterior.prob2                                       # analyzed output
+
+```
+```{r}
+#Calculate Wilcoxon Rank Sum median differences.
+H2test <- compare_means(meanDV ~ h2var, data= H2recode, method = "wilcox.test", adjustment = "holmes")
+H2test
+```
+```{r}
+# Create boxplot visualization with Wilcoxon p-value
+H2recode %>%      ggplot(aes(x= h2var, y= meanDV)) + 
+                  geom_boxplot() + 
+                  stat_compare_means(comparisons = list( c("in", "no") )) + 
+                  labs(x= "Condition", y= "Belief in God") + 
+                  geom_jitter(width = 0.2, height = 0.2) + 
+                  scale_y_continuous(breaks = seq(0, 8, 1), lim = c(0, 8))  + 
+                  theme_classic() + 
+                  scale_x_discrete(labels= c( "In-Control", "No-Control"))
+```
+#### Hypothesis 3
+H3:  Engaging in the Ultimatum Game will be more effective in inducing a lowered sense of control as compared to autobiographical recall. 
+```{r}
+# Recoding conditions for hypothesis testing T1 vs T3 no-control conditions
+H3recode              <- clean1 %>% mutate(h3var = case_when(
+                                     Condition == 1~"no" ,
+                                     Condition == 2~"in" ,
+                                     Condition == 3~"no" ,
+                                     Condition == 4~"in" )) %>% filter(h3var== "no") %>% 
+                       mutate(temporality =  case_when(
+                                       Condition ==1 ~ "past",
+                                       Condition == 3 ~ "present"))
+H3null                <- lmBF(deltaC ~ Reli, data = H3recode)
+H3alt                 <- lmBF(deltaC ~ temporality + Reli, data = H3recode)
+BFH3                  <- H3alt/H3null
+samples3              <- posterior(H3alt, iterations = 10000)
+
+mean.dif.condition3  <- samples3[,"temporality-past"] - samples3[,"temporality-present"]
+med.mean.dif.con3    <- median(mean.dif.condition3)
+grant.slope.rel3     <- samples3[,"Reli-Reli"]
+med.grant.slope.rel3 <- median(grant.slope.rel3)
+test.rule3           <- (samples3[,"temporality-past"] < samples3[,"temporality-present"])
+BF_rest_exp3         <- BFplus0(H3alt, BFH3, test.rule3)
+
+#Interaction effect model exploration
+M3full                <- lmBF(deltaC ~ Reli + temporality + Reli:temporality, data = H3recode)
+M3int                 <- M3full/H3alt
+
+# Calculate prior and posterior model probabilities 
+BFs3                  <- c(H3null, H3alt, M3full)           #get relevant models to compare 
+prior.odds3           <- newPriorOdds(BFs3, type = "equal") #set all prior odds to 1
+post.odds3            <- prior.odds3 * BFs3                 #calculate posterior odds based on Bayes' rule
+post.prob3            <- as.BFprobability(post.odds3)       #Normalize to add up to 1 (probabilities)
+posterior.prob3       <- post.prob3
+posterior.prob3
+
+```
+```{r}
+#Calculate Wilcoxon Rank Sum median differences.
+compare_means(deltaC ~ temporality, data= H3recode, method = "wilcox.test", adjustment = "holmes")
+```
+```{r}
+# Create boxplot visualization with Wilcoxon p-value
+H3recode %>%          ggplot(aes(x= temporality, y= deltaC)) + 
+                      geom_boxplot() + 
+                      stat_compare_means(comparisons= list( c("present", "past") )) + 
+                      labs(x= "Condition", y= "Change in Sense of Control") + 
+                      geom_jitter(width = 0.2, height = 0.2) + 
+                      scale_y_continuous(breaks = seq(-6, 6, 1), lim = c(-6, 6))  + 
+                      theme_classic() + 
+                      scale_x_discrete(labels= c( "Past", "Present"))
+```
+#### Hypothesis 4
+H4: Engaging in the Dictator Game will be more effective in inducing an increased sense of control as compared to autobiographical recall.
+```{r}
+# Recoding conditions for hypothesis testing T2 vs T4 in-control conditions
+H4recode      <- clean1 %>% mutate(h4var = case_when(
+                                     Condition == 1~"no" ,
+                                     Condition == 2~"in" ,
+                                     Condition == 3~"no" ,
+                                     Condition == 4~"in" )) %>% filter(h4var== "in") %>% 
+                      mutate(temporality =  case_when(
+                                       Condition ==2 ~ "past",
+                                       Condition == 4 ~ "present"))
+
+H4null                <- lmBF(deltaC ~ Reli, data = H4recode)
+H4alt                 <- lmBF(deltaC ~ temporality + Reli, data = H4recode)
+BFH4                  <- H4alt/H4null
+samples4              <- posterior(H4alt, iterations = 10000)
+
+mean.dif.condition4  <- samples4[,"temporality-past"] - samples4[,"temporality-present"]
+med.mean.dif.con4    <- median(mean.dif.condition4)
+grant.slope.rel4     <- samples4[,"Reli-Reli"]
+med.grant.slope.rel4 <- median(grant.slope.rel4)
+test.rule4           <- (samples4[,"temporality-past"] < samples4[,"temporality-present"])
+BF_rest_exp4         <- BFplus0(H4alt, BFH4, test.rule4)
+
+#Interaction effect model exploration
+M4full <- lmBF(deltaC ~ Reli + temporality + Reli:temporality, data = H4recode)
+M4int  <- M4full/H4alt
+
+# Calculate prior and posterior model probabilities 
+BFs4            <- c(H4null, H4alt, M4full)           #get relevant models to compare 
+prior.odds4     <- newPriorOdds(BFs4, type = "equal") #set all prior odds to 1
+post.odds4      <- prior.odds4 * BFs4                 #calculate posterior odds based on Bayes' rule
+post.prob4     <- as.BFprobability(post.odds4)        #Normalize to add up to 1 (probabilities)
+posterior.prob4 <- post.prob4
+posterior.prob4
+
+```
+```{r}
+#Calculate Wilcoxon Rank Sum median differences.
+compare_means(deltaC ~ temporality, data= H4recode, method = "wilcox.test", adjustment = "holmes")
+```
+```{r}
+# Create boxplot visualization with Wilcoxon p-value
+H4recode %>%              ggplot(aes(x= temporality, y= deltaC), color= (temporality)) + 
+                          geom_boxplot() + 
+                          stat_compare_means(comparisons= list( c("present", "past"))) + 
+                          labs(x= "Condition", y= "Change in Sense of Control") + 
+                          geom_jitter(width = 0.2, height = 0.2) + 
+                          scale_y_continuous(breaks = seq(-4, 4, 1), lim = c(-4, 4)) + 
+                          theme_classic() + 
+                          scale_x_discrete(labels= c( "Past", "Present"))
+```
+
+#### Between Group Analysis
+```{r}
+# Computing Wilcoxon Rank Sum tests across all condition pairs
+compare_means(meanDV ~ (Condition), data= clean1, method = "wilcox.test", adjustment = "holmes")
+```
+
+```{r}
+#Plotting Belief in God across all conditions with pairwise Wilcoxon p-values for comparable treatments
+comparisons <- list( c("4", "3"), c("4", "2"), c("3", "1"), c("2", "1") )
+clean1 %>%            ggplot(aes(x= factor(Condition), y= meanDV, color= factor(Condition))) + 
+                      geom_boxplot() + stat_compare_means(comparisons= comparisons) + 
+                      labs(x= "Condition", y= "Belief in God") + 
+                      scale_x_discrete(labels= c("Past- No Control", "Past- In Control", "Present- No Control", "Present- In Control")) + 
+                      geom_jitter(width = 0.3, height = 0.3) + 
+                      scale_y_continuous(breaks = seq(0, 8, 1), lim = c(0, 10)) + 
+                      theme_classic()
+```
+
+```{r}
+#Compute Kruskal Wallis median comparison test 
+compare_means(meanDV ~ Condition, data= clean1, method= "kruskal.test", adjustment = "holmes")
+```
+#### OLS Robustness Check
+```{r}
+# Model to check for significance across conditions and covariates 
+olscheck <- (lm(meanDV ~  factor(Condition) + Reli + meanC, data = clean1))
+summary(olscheck)
+```
+```{r mylatextable, results = "asis", echo=FALSE}
+#Formatting output table for the OLS check
+stargazer(olscheck, type = 'latex', 
+          title = 'Regression table of OLS regression', 
+          single.row=TRUE)
+```
+
+#### Appendix L calculations
+
+```{r}
+# Means and Standard Deviations by condition
+meansAndSDs <- clean1 %>% select(Condition, meanDV, meanC) %>% group_by(Condition) %>% summarize( meanGod = mean(meanDV), sdGod = sd(meanDV), meanCon = mean(meanC), sdCOn = sd(meanC))
+meansAndSDs
+```
+
+
+
+
+
+
